@@ -34,8 +34,26 @@ extern const AP_HAL::HAL& hal;
 #define CMD_MS5611_PROM_C5 0xAA
 #define CMD_MS5611_PROM_C6 0xAC
 #define CMD_MS5611_PROM_CRC 0xAE
-#define CMD_CONVERT_D1_OSR4096 0x48   // Maximum resolution (oversampling)
-#define CMD_CONVERT_D2_OSR4096 0x58   // Maximum resolution (oversampling)
+
+#define ADDR_CMD_CONVERT_D1_OSR256  0x40 /* write to this address to start pressure conversion */
+#define ADDR_CMD_CONVERT_D1_OSR512  0x42 /* write to this address to start pressure conversion */
+#define ADDR_CMD_CONVERT_D1_OSR1024 0x44 /* write to this address to start pressure conversion */
+#define ADDR_CMD_CONVERT_D1_OSR2048 0x46 /* write to this address to start pressure conversion */
+#define ADDR_CMD_CONVERT_D1_OSR4096 0x48 /* write to this address to start pressure conversion */
+#define ADDR_CMD_CONVERT_D2_OSR256  0x50 /* write to this address to start temperature conversion */
+#define ADDR_CMD_CONVERT_D2_OSR512  0x52 /* write to this address to start temperature conversion */
+#define ADDR_CMD_CONVERT_D2_OSR1024 0x54 /* write to this address to start temperature conversion */
+#define ADDR_CMD_CONVERT_D2_OSR2048 0x56 /* write to this address to start temperature conversion */
+#define ADDR_CMD_CONVERT_D2_OSR4096 0x58 /* write to this address to start temperature conversion */
+
+/*
+  use an OSR of 1024 to reduce the self-heating effect of the
+  sensor. Information from MS tells us that some individual sensors
+  are quite sensitive to this effect and that reducing the OSR can
+  make a big difference
+ */
+#define ADDR_CMD_CONVERT_D1			ADDR_CMD_CONVERT_D1_OSR1024
+#define ADDR_CMD_CONVERT_D2			ADDR_CMD_CONVERT_D2_OSR1024
 
 // SPI Device //////////////////////////////////////////////////////////////////
 
@@ -51,11 +69,11 @@ void AP_SerialBus_SPI::init()
 {
     _spi = hal.spi->device(_device);
     if (_spi == NULL) {
-        hal.scheduler->panic(PSTR("did not get valid SPI device driver!"));
+        hal.scheduler->panic("did not get valid SPI device driver!");
     }
     _spi_sem = _spi->get_semaphore();
     if (_spi_sem == NULL) {
-        hal.scheduler->panic(PSTR("AP_SerialBus_SPI did not get valid SPI semaphroe!"));
+        hal.scheduler->panic("AP_SerialBus_SPI did not get valid SPI semaphroe!");
     }
     _spi->set_bus_speed(_speed);
 }
@@ -111,7 +129,7 @@ void AP_SerialBus_I2C::init()
 {
     _i2c_sem = _i2c->get_semaphore();
     if (_i2c_sem == NULL) {
-        hal.scheduler->panic(PSTR("AP_SerialBus_I2C did not get valid I2C semaphore!"));
+        hal.scheduler->panic("AP_SerialBus_I2C did not get valid I2C semaphore!");
     }
 }
 
@@ -174,7 +192,7 @@ AP_Baro_MS56XX::AP_Baro_MS56XX(AP_Baro &baro, AP_SerialBus *serial, bool use_tim
     hal.scheduler->suspend_timer_procs();
 
     if (!_serial->sem_take_blocking()){
-        hal.scheduler->panic(PSTR("PANIC: AP_Baro_MS56XX: failed to take serial semaphore for init"));
+        hal.scheduler->panic("PANIC: AP_Baro_MS56XX: failed to take serial semaphore for init");
     }
 
     _serial->write(CMD_MS5611_RESET);
@@ -190,11 +208,11 @@ AP_Baro_MS56XX::AP_Baro_MS56XX(AP_Baro &baro, AP_SerialBus *serial, bool use_tim
     _C6 = _serial->read_16bits(CMD_MS5611_PROM_C6);
 
     if (!_check_crc()) {
-        hal.scheduler->panic(PSTR("Bad CRC on MS5611"));
+        hal.scheduler->panic("Bad CRC on MS5611");
     }
 
     // Send a command to read Temp first
-    _serial->write(CMD_CONVERT_D2_OSR4096);
+    _serial->write(ADDR_CMD_CONVERT_D2);
     _last_timer = hal.scheduler->micros();
     _state = 0;
 
@@ -290,16 +308,16 @@ void AP_Baro_MS56XX::_timer(void)
                 _d2_count = 16;
             }
 
-            if (_serial->write(CMD_CONVERT_D1_OSR4096)) {      // Command to read pressure
+            if (_serial->write(ADDR_CMD_CONVERT_D1)) {      // Command to read pressure
                 _state++;
             }
         } else {
             /* if read fails, re-initiate a temperature read command or we are
              * stuck */
-            _serial->write(CMD_CONVERT_D2_OSR4096);
+            _serial->write(ADDR_CMD_CONVERT_D2);
         }
     } else {
-        uint32_t d1 = _serial->read_24bits(0);;
+        uint32_t d1 = _serial->read_24bits(0);
         if (d1 != 0) {
             // occasional zero values have been seen on the PXF
             // board. These may be SPI errors, but safest to ignore
@@ -316,18 +334,18 @@ void AP_Baro_MS56XX::_timer(void)
             _updated = true;
 
             if (_state == 4) {
-                if (_serial->write(CMD_CONVERT_D2_OSR4096)) { // Command to read temperature
+                if (_serial->write(ADDR_CMD_CONVERT_D2)) { // Command to read temperature
                     _state = 0;
                 }
             } else {
-                if (_serial->write(CMD_CONVERT_D1_OSR4096)) { // Command to read pressure
+                if (_serial->write(ADDR_CMD_CONVERT_D1)) { // Command to read pressure
                     _state++;
                 }
             }
         } else {
             /* if read fails, re-initiate a pressure read command or we are
              * stuck */
-            _serial->write(CMD_CONVERT_D1_OSR4096);
+            _serial->write(ADDR_CMD_CONVERT_D1);
         }
     }
 
@@ -384,10 +402,9 @@ void AP_Baro_MS5611::_calculate()
     // Formulas from manufacturer datasheet
     // sub -15c temperature compensation is not included
 
-    // we do the calculations using floating point
-    // as this is much faster on an AVR2560, and also allows
-    // us to take advantage of the averaging of D1 and D1 over
-    // multiple samples, giving us more precision
+    // we do the calculations using floating point allows us to take advantage
+    // of the averaging of D1 and D1 over multiple samples, giving us more
+    // precision
     dT = _D2-(((uint32_t)_C5)<<8);
     TEMP = (dT * _C6)/8388608;
     OFF = _C2 * 65536.0f + (_C4 * dT) / 128;
@@ -424,10 +441,9 @@ void AP_Baro_MS5607::_calculate()
     // Formulas from manufacturer datasheet
     // sub -15c temperature compensation is not included
 
-    // we do the calculations using floating point
-    // as this is much faster on an AVR2560, and also allows
-    // us to take advantage of the averaging of D1 and D1 over
-    // multiple samples, giving us more precision
+    // we do the calculations using floating point allows us to take advantage
+    // of the averaging of D1 and D1 over multiple samples, giving us more
+    // precision
     dT = _D2-(((uint32_t)_C5)<<8);
     TEMP = (dT * _C6)/8388608;
     OFF = _C2 * 131072.0f + (_C4 * dT) / 64;
